@@ -1,0 +1,85 @@
+# =============================================================================
+# Agent Discovery & Triage — the "automations" half of the loop.
+#
+# On a schedule (and on demand), a scout agent reads the repo memory
+# (LOOP_STATE.md), inspects repo health, dedupes against open `agent-loop`
+# issues, and files a small number of well-formed issues. Each issue contains
+# a "Task for the loop" section you can paste straight into the Agent Loop
+# workflow's `task` input — discovery feeds the loop, a human stays in between.
+#
+# Requires: ANTHROPIC_API_KEY repo secret.
+# =============================================================================
+name: Agent Discovery & Triage
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # 06:00 UTC every Monday — adjust to taste
+  workflow_dispatch:
+    inputs:
+      focus:
+        description: "Optional focus area for this discovery run"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      FOCUS: ${{ inputs.focus }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Claude Code CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Ensure label exists
+        run: gh label create agent-loop --color 5319e7 --description "Created by the agent loop pipeline" 2>/dev/null || true
+
+      - name: Run discovery scout
+        run: |
+          PROMPT=$(cat <<'EOF'
+          You are loop-scout, the discovery-and-triage automation of this repo's engineering loop.
+
+          1. Read LOOP_STATE.md (repo memory) and CLAUDE.md first.
+          2. Investigate repo health: recent history (git log --oneline -20), TODO/FIXME/HACK markers,
+             whether the deterministic gate is green on this branch (bash .github/scripts/detect-and-test.sh),
+             suspicious or untested recently-changed files, and anything the "Next" section of
+             LOOP_STATE.md says is pending.
+          3. Dedupe before filing anything: gh issue list --label agent-loop --state open
+          4. File AT MOST 5 new issues with:
+             gh issue create --label agent-loop --title "..." --body "..."
+             Each body must contain three sections: "Problem", "Evidence" (file:line references),
+             and "Task for the loop" — one paragraph phrased so it can be pasted directly into the
+             Agent Loop workflow's `task` input.
+          5. Finish with a markdown report: a table of findings (new / already tracked / ignored and why)
+             and the single highest-priority task you would run next.
+          EOF
+          )
+          if [ -n "$FOCUS" ]; then
+            PROMPT="$PROMPT
+
+          Extra focus requested for this run: $FOCUS"
+          fi
+          claude -p "$PROMPT" \
+            --agent loop-scout \
+            --output-format json \
+            --permission-mode acceptEdits \
+            --allowedTools "Bash,Read,Glob,Grep" \
+            --max-turns 30 \
+            > "$RUNNER_TEMP/scout.json" || true
+          {
+            echo "## Discovery & triage report"
+            echo ""
+            jq -r '.result // "scout produced no report"' "$RUNNER_TEMP/scout.json" 2>/dev/null || echo "scout produced no output"
+          } >> "$GITHUB_STEP_SUMMARY"

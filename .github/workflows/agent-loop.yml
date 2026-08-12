@@ -1,0 +1,182 @@
+# =============================================================================
+# Agent Loop — a parameterized engineering loop for GitHub Actions.
+#
+# Trigger it from the Actions tab with a task. A builder agent implements the
+# work, a deterministic gate re-runs tests/checks (the agent's word is never
+# trusted), failures are fed back to the agent until green or out of
+# iterations, an independent verifier agent reviews the diff, and the result
+# lands as a PR plus an entry in LOOP_STATE.md (the repo's memory).
+#
+# Requires: ANTHROPIC_API_KEY repo secret, and
+# Settings → Actions → General → "Allow GitHub Actions to create and approve
+# pull requests" enabled (for the PR step).
+# =============================================================================
+name: Agent Loop
+
+run-name: "Agent loop: ${{ inputs.task }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What should the agent build / fix / change?"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch to start from and target the PR at"
+        required: false
+        default: "main"
+        type: string
+      max_iterations:
+        description: "Max implement → verify iterations before giving up"
+        required: false
+        default: "3"
+        type: string
+      verify_command:
+        description: "Override verify command (empty = auto-detect the stack)"
+        required: false
+        default: ""
+        type: string
+      model:
+        description: "Model override for the agents (empty = default)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  loop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      TASK: ${{ inputs.task }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+      MAX_ITERATIONS: ${{ inputs.max_iterations }}
+      VERIFY_COMMAND: ${{ inputs.verify_command }}
+      MODEL: ${{ inputs.model }}
+    steps:
+      - name: Check out base branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+
+      - name: Install Claude Code CLI
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create isolated work branch
+        run: |
+          git config user.name "agent-loop[bot]"
+          git config user.email "agent-loop[bot]@users.noreply.github.com"
+          SLUG=$(printf '%s' "$TASK" | head -n1 | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | cut -c1-40)
+          SLUG=$(printf '%s' "$SLUG" | sed 's/^-*//; s/-*$//')
+          BRANCH="agent/${SLUG:-task}-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Run the engineering loop (implement → verify → iterate → review)
+        run: bash .github/scripts/agent-loop.sh
+
+      - name: Record run in loop memory (LOOP_STATE.md)
+        if: always() && env.BRANCH != ''
+        run: |
+          STATUS=red; [ "${GREEN:-0}" = "1" ] && STATUS=green
+          TASK_LINE=$(printf '%s' "$TASK" | head -n1 | cut -c1-200)
+          {
+            echo ""
+            echo "### $(date -u +%F) — run ${{ github.run_id }}"
+            echo "- Task: ${TASK_LINE}"
+            echo "- Gate: ${STATUS} after ${ITERATIONS_USED:-0}/${MAX_ITERATIONS} iteration(s) · review: ${VERDICT:-SKIPPED}"
+            echo "- Branch: \`${BRANCH}\`"
+          } >> LOOP_STATE.md
+
+      - name: Finalize — commit leftovers, push, open PR
+        if: always() && env.BRANCH != ''
+        run: |
+          # Fallback commit for anything the agent left uncommitted (e.g. the
+          # memory entry above). Dependency/build dirs are excluded defensively.
+          git add -A -- . ':!node_modules' ':!**/node_modules' ':!.venv' ':!venv' \
+            ':!dist' ':!build' ':!target' ':!__pycache__' ':!**/__pycache__' \
+            ':!*.pyc' ':!*.log' 2>/dev/null || git add -A
+          git diff --cached --quiet || git commit -m "agent-loop: finalize run ${{ github.run_id }}"
+
+          if [ -z "$(git log --oneline "origin/${BASE_BRANCH}..HEAD" 2>/dev/null)" ]; then
+            echo "NOTHING_CHANGED=1" >> "$GITHUB_ENV"
+            echo "No commits beyond ${BASE_BRANCH} — nothing to push, no PR."
+            exit 0
+          fi
+          git push -u origin "$BRANCH"
+
+          STATUS=red; [ "${GREEN:-0}" = "1" ] && STATUS=green
+          gh label create agent-loop   --color 5319e7 --description "Created by the agent loop pipeline" 2>/dev/null || true
+          gh label create "loop:green" --color 0e8a16 --description "Deterministic gate passed"          2>/dev/null || true
+          gh label create "loop:red"   --color d93f0b --description "Deterministic gate failed"          2>/dev/null || true
+
+          TITLE="agent-loop: $(printf '%s' "$TASK" | head -n1 | cut -c1-70)"
+          DRAFT_FLAG=""
+          { [ "$STATUS" = "red" ] || [ "${VERDICT:-}" = "REQUEST_CHANGES" ]; } && DRAFT_FLAG="--draft"
+
+          {
+            echo "## Agent loop result"
+            echo ""
+            echo "**Task**"
+            echo ""
+            echo '```'
+            printf '%s\n' "$TASK"
+            echo '```'
+            echo ""
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| Deterministic gate | ${STATUS} |"
+            echo "| Iterations used | ${ITERATIONS_USED:-0} of ${MAX_ITERATIONS} |"
+            echo "| Independent review | ${VERDICT:-SKIPPED} |"
+            echo "| Est. API cost (USD) | ${TOTAL_COST_USD:-n/a} |"
+            echo "| Run | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo ""
+            echo "## Independent review report"
+            echo ""
+            if [ -n "${VERIFIER_REPORT:-}" ] && [ -f "${VERIFIER_REPORT}" ]; then
+              cat "${VERIFIER_REPORT}"
+            else
+              echo "_no report_"
+            fi
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          gh pr create --base "$BASE_BRANCH" --head "$BRANCH" \
+            --title "$TITLE" --body-file "$RUNNER_TEMP/pr-body.md" \
+            --label agent-loop --label "loop:${STATUS}" $DRAFT_FLAG \
+            || echo "::warning::Could not open a PR automatically. Enable 'Allow GitHub Actions to create and approve pull requests' (Settings → Actions → General), or open it manually: ${{ github.server_url }}/${{ github.repository }}/compare/${BASE_BRANCH}...${BRANCH}"
+
+      - name: Job summary
+        if: always()
+        run: |
+          STATUS="🔴 red"; [ "${GREEN:-0}" = "1" ] && STATUS="🟢 green"
+          {
+            echo "## Agent loop"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Task | $(printf '%s' "$TASK" | head -n1 | cut -c1-120) |"
+            echo "| Deterministic gate | ${STATUS} |"
+            echo "| Iterations | ${ITERATIONS_USED:-0}/${MAX_ITERATIONS} |"
+            echo "| Review verdict | ${VERDICT:-SKIPPED} |"
+            echo "| Est. API cost (USD) | ${TOTAL_COST_USD:-n/a} |"
+            if [ "${NOTHING_CHANGED:-0}" = "1" ]; then
+              echo ""
+              echo "> ⚠️ The agent made no commits — nothing was pushed and no PR was opened."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce the gate
+        if: env.GREEN != '1'
+        run: |
+          echo "Deterministic gate never went green — failing the run. The branch and draft PR (if any) are preserved for inspection."
+          exit 1
