@@ -7,8 +7,10 @@
 # a "Task for the loop" section you can paste straight into the Agent Loop
 # workflow's `task` input — discovery feeds the loop, a human stays in between.
 #
-# Auth (one of): CLAUDE_CODE_OAUTH_TOKEN repo secret (Claude Pro/Max
-# subscription — `claude setup-token`) or ANTHROPIC_API_KEY repo secret.
+# Auth (one repo secret): CLAUDE_CODE_OAUTH_TOKEN (Claude Pro/Max
+# subscription — `claude setup-token`), ANTHROPIC_API_KEY, CODEX_AUTH_JSON
+# (ChatGPT subscription — `codex login`, paste ~/.codex/auth.json), or
+# OPENAI_API_KEY. The engine (claude / codex CLI) is picked to match.
 # =============================================================================
 name: Agent Discovery & Triage
 
@@ -27,6 +29,15 @@ on:
         required: false
         default: ""
         type: string
+      engine:
+        description: "Agent CLI: auto (by available secrets), claude, or codex (OpenAI)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - claude
+          - codex
 
 permissions:
   contents: read
@@ -39,29 +50,50 @@ jobs:
     env:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GH_TOKEN: ${{ github.token }}
       FOCUS: ${{ inputs.focus }}
       SCOUT_MODEL: ${{ inputs.model }}
+      ENGINE: ${{ inputs.engine }}
     steps:
-      - name: Check auth is configured
+      - name: Resolve engine & check auth
         run: |
-          if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            echo "Auth: Claude subscription (CLAUDE_CODE_OAUTH_TOKEN)"
-            echo "ANTHROPIC_API_KEY=" >> "$GITHUB_ENV"
-          elif [ -n "$ANTHROPIC_API_KEY" ]; then
-            echo "Auth: Anthropic API key (ANTHROPIC_API_KEY)"
-          else
-            echo "::error::No auth configured. Add repo secret CLAUDE_CODE_OAUTH_TOKEN (subscription — run 'claude setup-token' locally) or ANTHROPIC_API_KEY (console.anthropic.com)."
-            exit 1
+          ENGINE="${ENGINE:-auto}"
+          if [ "$ENGINE" = "auto" ]; then
+            if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || [ -n "$ANTHROPIC_API_KEY" ]; then
+              ENGINE=claude
+            elif [ -n "$CODEX_AUTH_JSON" ] || [ -n "$OPENAI_API_KEY" ]; then
+              ENGINE=codex
+            else
+              echo "::error::No auth configured. Add a repo secret: CLAUDE_CODE_OAUTH_TOKEN (Claude subscription — 'claude setup-token'), ANTHROPIC_API_KEY, CODEX_AUTH_JSON (ChatGPT subscription — 'codex login', paste ~/.codex/auth.json), or OPENAI_API_KEY."
+              exit 1
+            fi
           fi
+          if [ "$ENGINE" = "claude" ] && [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "ANTHROPIC_API_KEY=" >> "$GITHUB_ENV"
+          fi
+          echo "Engine: $ENGINE"
+          echo "ENGINE=$ENGINE" >> "$GITHUB_ENV"
 
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Install Claude Code CLI
+      - name: Install agent CLI
         run: |
-          curl -fsSL https://claude.ai/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          if [ "$ENGINE" = "codex" ]; then
+            npm install -g @openai/codex
+            if [ -n "$CODEX_AUTH_JSON" ]; then
+              mkdir -p "$HOME/.codex"
+              printf '%s' "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
+              chmod 600 "$HOME/.codex/auth.json"
+            elif [ -n "$OPENAI_API_KEY" ]; then
+              codex login --api-key "$OPENAI_API_KEY"
+            fi
+          else
+            curl -fsSL https://claude.ai/install.sh | bash
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Ensure label exists
         run: gh label create agent-loop --color 5319e7 --description "Created by the agent loop pipeline" 2>/dev/null || true
@@ -93,16 +125,30 @@ jobs:
           fi
           MODEL_ARGS=()
           [ -n "$SCOUT_MODEL" ] && MODEL_ARGS=(--model "$SCOUT_MODEL")
-          claude -p "$PROMPT" \
-            --agent loop-scout \
-            --output-format json \
-            --permission-mode acceptEdits \
-            --allowedTools "Bash,Read,Glob,Grep" \
-            --max-turns 30 \
-            "${MODEL_ARGS[@]}" \
-            > "$RUNNER_TEMP/scout.json" || true
-          {
-            echo "## Discovery & triage report"
-            echo ""
-            jq -r '.result // "scout produced no report"' "$RUNNER_TEMP/scout.json" 2>/dev/null || echo "scout produced no output"
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$ENGINE" = "codex" ]; then
+            codex exec \
+              --sandbox danger-full-access \
+              --skip-git-repo-check \
+              --output-last-message "$RUNNER_TEMP/scout-report.md" \
+              "${MODEL_ARGS[@]}" \
+              "$PROMPT" > "$RUNNER_TEMP/scout.log" 2>&1 || true
+            {
+              echo "## Discovery & triage report"
+              echo ""
+              cat "$RUNNER_TEMP/scout-report.md" 2>/dev/null || echo "scout produced no report"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            claude -p "$PROMPT" \
+              --agent loop-scout \
+              --output-format json \
+              --permission-mode acceptEdits \
+              --allowedTools "Bash,Read,Glob,Grep" \
+              --max-turns 30 \
+              "${MODEL_ARGS[@]}" \
+              > "$RUNNER_TEMP/scout.json" || true
+            {
+              echo "## Discovery & triage report"
+              echo ""
+              jq -r '.result // "scout produced no report"' "$RUNNER_TEMP/scout.json" 2>/dev/null || echo "scout produced no output"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

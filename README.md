@@ -6,9 +6,11 @@ You give it a task. An AI agent builds it, a script proves it works, a second
 agent reviews it, and you get a PR. **Nothing merges without you.**
 
 1. Copy this repo's files into your project.
-2. Add ONE auth secret: `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max
-   **subscription** — run `claude setup-token` locally and paste the token) or
-   `ANTHROPIC_API_KEY` (pay-per-token API key).
+2. Add ONE auth secret — subscription or API key, Claude or OpenAI:
+   `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max subscription — `claude
+   setup-token`), `ANTHROPIC_API_KEY`, `CODEX_AUTH_JSON` (ChatGPT Plus/Pro
+   subscription — `codex login`, paste `~/.codex/auth.json`), or
+   `OPENAI_API_KEY`.
 3. Settings → Actions → General → enable **"Allow GitHub Actions to create and
    approve pull requests"**.
 4. Actions tab → **Agent Loop** → *Run workflow* → type your task → review the
@@ -72,11 +74,14 @@ you review and merge — the loop never merges its own work
 | `model` | Model for **all** agents | CLI default |
 | `builder_model` | Model for the builder only (overrides `model`) | `model` |
 | `verifier_model` | Model for the verifier only (overrides `model`) | `model` |
+| `engine` | Agent CLI: `auto`, `claude`, or `codex` (OpenAI) | `auto` (by secrets) |
 
 Mixing models is the usual reason to set these separately — e.g. a fast, cheap
 model for the builder (`claude-sonnet-5`) and a stronger one for the
-independent review (`claude-opus-5`), or vice versa. The discovery workflow
-takes its own `model` input for the scout.
+independent review (`claude-opus-5`), or vice versa. Model names must match
+the engine: Claude model IDs on the `claude` engine, OpenAI model IDs (e.g.
+`gpt-5-codex`) on `codex`. The discovery workflow takes its own `model` and
+`engine` inputs for the scout.
 
 **On a schedule** — *Agent Discovery & Triage* runs Mondays 06:00 UTC. The
 scout files at most 5 evidence-backed issues labeled `agent-loop`, each ending
@@ -105,18 +110,31 @@ project, then:
 Optional: commit a `.mcp.json` at repo root to give the agents MCP connectors
 (Linear, etc.) — see `LOOP_PIPELINE.md` for the wiring.
 
-## Auth: subscription or API key
+## Auth: subscription or API key, Claude or OpenAI
 
-Both workflows accept either secret, checked in this order:
+The agents can run on two engines — **Claude Code** (`claude`) or **OpenAI
+Codex** (`codex`) — each with subscription or pay-per-token auth. Add one
+repo secret; `engine: auto` picks the matching CLI (Claude wins if both
+ecosystems have secrets):
 
-| Secret | Where it comes from | Billing |
-|---|---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` | Run `claude setup-token` on your machine (needs a Claude Pro/Max subscription), paste the token as a repo secret | Uses your subscription's included usage — no per-token charge |
-| `ANTHROPIC_API_KEY` | console.anthropic.com | Pay per token |
+| Secret | Engine | Where it comes from | Billing |
+|---|---|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | claude | Run `claude setup-token` on your machine (needs Claude Pro/Max), paste the token | Subscription — no per-token charge |
+| `ANTHROPIC_API_KEY` | claude | console.anthropic.com | Pay per token |
+| `CODEX_AUTH_JSON` | codex | Run `codex login` on your machine (needs ChatGPT Plus/Pro), paste the **contents** of `~/.codex/auth.json` | Subscription — no per-token charge |
+| `OPENAI_API_KEY` | codex | platform.openai.com | Pay per token |
 
-If both are set, the subscription token wins. On subscription auth the
-"Est. API cost" column in PRs and job summaries is informational only —
-nothing is billed per token.
+Within an engine the subscription secret wins over the API key. The engine
+applies to all agents in a run (builder, verifier, scout) — per-agent engine
+mixing isn't supported, only per-agent models. On the codex engine the
+"Est. API cost" column shows `n/a` (Codex doesn't report per-run cost), and
+on subscription auth it's informational only either way.
+
+Notes on the codex engine: the loop's prompts carry the full role
+instructions so it works out of the box, but the `.claude/agents/*.md`
+personas, the project-playbook *skill* mechanism, and session resume between
+iterations are Claude Code features — on Codex each retry round starts a
+fresh session that's pointed at the work already on the branch.
 
 ## Safety & cost
 

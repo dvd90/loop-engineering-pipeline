@@ -57,7 +57,13 @@ the only thing that counts as "done, tested, and checked."
      `claude setup-token` locally and paste the token. Runs draw on your
      subscription's included usage instead of per-token billing.
    - `ANTHROPIC_API_KEY` — pay-per-token API key from console.anthropic.com.
-   If both exist, the subscription token is used.
+   - `CODEX_AUTH_JSON` — ChatGPT Plus/Pro **subscription** (OpenAI Codex
+     engine): run `codex login` locally and paste the contents of
+     `~/.codex/auth.json`.
+   - `OPENAI_API_KEY` — pay-per-token API key from platform.openai.com.
+   The `engine` input (default `auto`) picks the matching CLI — Claude
+   secrets → `claude`, OpenAI secrets → `codex`, Claude preferred when both
+   exist. Within an engine, subscription beats API key.
 3. **Allow PR creation**: Settings → Actions → General → Workflow permissions →
    check **"Allow GitHub Actions to create and approve pull requests"** (and
    keep "Read and write permissions" or rely on the workflow's `permissions:`
@@ -80,8 +86,13 @@ the only thing that counts as "done, tested, and checked."
 - `verify_command` — override the auto-detected gate (e.g. `npm run ci`)
 - `model` — optional model for all agents
 - `builder_model` / `verifier_model` — per-agent overrides of `model`, so you
-  can mix models (e.g. a cheap builder with a stronger reviewer). The
-  discovery workflow has its own `model` input for the scout.
+  can mix models (e.g. a cheap builder with a stronger reviewer). Model names
+  must match the engine (Claude IDs vs OpenAI IDs). The discovery workflow
+  has its own `model` input for the scout.
+- `engine` — `auto` (default, picked by available secrets), `claude`
+  (Claude Code CLI), or `codex` (OpenAI Codex CLI). One engine per run; on
+  `codex`, retry rounds start fresh sessions pointed at the branch's existing
+  work instead of resuming, and per-run cost reporting is unavailable.
 
 **On a schedule**: *Agent Discovery & Triage* runs Mondays 06:00 UTC (edit the
 cron). The scout files at most 5 evidence-backed issues labeled `agent-loop`,

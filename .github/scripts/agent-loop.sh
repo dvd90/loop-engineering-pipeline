@@ -19,6 +19,19 @@ MODEL="${MODEL:-}"                       # default model for every agent
 BUILDER_MODEL="${BUILDER_MODEL:-$MODEL}" # per-agent overrides (empty = MODEL,
 VERIFIER_MODEL="${VERIFIER_MODEL:-$MODEL}" # both empty = CLI default)
 
+# Which agent CLI runs the loop: claude (Claude Code) or codex (OpenAI Codex).
+# "auto" picks by whichever credentials are present, preferring claude.
+ENGINE="${ENGINE:-auto}"
+if [ "$ENGINE" = "auto" ]; then
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    ENGINE=claude
+  elif [ -n "${CODEX_AUTH_JSON:-}" ] || [ -n "${OPENAI_API_KEY:-}" ] || [ -f "${HOME}/.codex/auth.json" ]; then
+    ENGINE=codex
+  else
+    ENGINE=claude
+  fi
+fi
+
 LOOP_DIR="${RUNNER_TEMP:-/tmp}/agent-loop"
 mkdir -p "$LOOP_DIR"
 
@@ -113,6 +126,32 @@ PROMPT
 run_builder() {
   # $1 = prompt, $2 = output json path, $3 = "fresh" | "resume"
   local prompt="$1" out="$2" mode="$3" rc sid
+  if [ "$ENGINE" = "codex" ]; then
+    # Codex sessions are not resumed across rounds — every round gets the
+    # full task context plus a pointer at the work already on the branch.
+    if [ "$mode" = "resume" ]; then
+      prompt="$(first_prompt)
+
+NOTE: A previous round already worked on this task on this branch. Read git log and git status first and build on that work — do not redo what is done.
+
+$prompt"
+    fi
+    codex exec \
+      --sandbox danger-full-access \
+      --skip-git-repo-check \
+      --output-last-message "$out.last" \
+      "${BUILDER_MODEL_ARGS[@]}" \
+      "$prompt" >"$out.log" 2>&1
+    rc=$?
+    if [ -s "$out.last" ]; then
+      log "builder report (tail):"
+      tail -n 40 "$out.last"
+    else
+      log "builder produced no report (rc=$rc); log tail:"
+      tail -n 20 "$out.log" 2>/dev/null || true
+    fi
+    return "$rc"
+  fi
   local resume_args=()
   if [ "$mode" = "resume" ] && [ -n "$SESSION_ID" ]; then
     resume_args=(--resume "$SESSION_ID")
@@ -142,6 +181,29 @@ run_builder() {
 run_verifier() {
   # $1 = report output path
   local out="$LOOP_DIR/verifier.json"
+  if [ "$ENGINE" = "codex" ]; then
+    codex exec \
+      --sandbox danger-full-access \
+      --skip-git-repo-check \
+      --output-last-message "$1" \
+      "${VERIFIER_MODEL_ARGS[@]}" \
+      "$(verifier_prompt)" >"$LOOP_DIR/verifier-codex.log" 2>&1 || true
+    [ -s "$1" ] || echo "verifier produced no report" >"$1"
+  else
+    run_verifier_claude "$1"
+  fi
+  if grep -q '^VERDICT: APPROVE[[:space:]]*$' "$1"; then
+    VERDICT="APPROVE"
+  elif grep -q '^VERDICT: REQUEST_CHANGES[[:space:]]*$' "$1"; then
+    VERDICT="REQUEST_CHANGES"
+  else
+    VERDICT="NO_VERDICT"
+  fi
+}
+
+run_verifier_claude() {
+  # $1 = report output path
+  local out="$LOOP_DIR/verifier.json"
   claude -p "$(verifier_prompt)" \
     --agent loop-verifier \
     --output-format json \
@@ -152,13 +214,6 @@ run_verifier() {
     >"$out" 2>"$out.err" || true
   jq -r '.result // "verifier produced no report"' "$out" 2>/dev/null >"$1" \
     || echo "verifier produced no report" >"$1"
-  if grep -q '^VERDICT: APPROVE[[:space:]]*$' "$1"; then
-    VERDICT="APPROVE"
-  elif grep -q '^VERDICT: REQUEST_CHANGES[[:space:]]*$' "$1"; then
-    VERDICT="REQUEST_CHANGES"
-  else
-    VERDICT="NO_VERDICT"
-  fi
 }
 
 run_verify() {
@@ -168,8 +223,9 @@ run_verify() {
 }
 
 # -------------------------------------------------------------- main loop ----
-command -v claude >/dev/null 2>&1 || { echo "::error::claude CLI not on PATH"; exit 1; }
+command -v "$ENGINE" >/dev/null 2>&1 || { echo "::error::$ENGINE CLI not on PATH"; exit 1; }
 log "Task: $TASK"
+log "Engine: $ENGINE"
 log "Max iterations: $MAX_ITERATIONS · builder turns: $BUILDER_MAX_TURNS · verifier turns: $VERIFIER_MAX_TURNS"
 log "Models: builder=${BUILDER_MODEL:-default} · verifier=${VERIFIER_MODEL:-default}"
 
@@ -227,9 +283,13 @@ else
 fi
 
 # ------------------------------------------------------------------ export ----
-TOTAL_COST_USD=$(cat "$LOOP_DIR"/builder-*.json "$LOOP_DIR"/verifier.json 2>/dev/null \
-  | jq -rs '[.[] | .total_cost_usd? // 0] | add // 0 | . * 100 | round / 100' 2>/dev/null)
-[ -n "$TOTAL_COST_USD" ] || TOTAL_COST_USD="n/a"
+if [ "$ENGINE" = "codex" ]; then
+  TOTAL_COST_USD="n/a" # codex exec does not report per-run cost
+else
+  TOTAL_COST_USD=$(cat "$LOOP_DIR"/builder-*.json "$LOOP_DIR"/verifier.json 2>/dev/null \
+    | jq -rs '[.[] | .total_cost_usd? // 0] | add // 0 | . * 100 | round / 100' 2>/dev/null)
+  [ -n "$TOTAL_COST_USD" ] || TOTAL_COST_USD="n/a"
+fi
 
 {
   echo "GREEN=$GREEN"
