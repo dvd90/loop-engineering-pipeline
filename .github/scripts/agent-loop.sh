@@ -15,7 +15,9 @@ set -uo pipefail
 : "${TASK:?TASK env var is required}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-3}"
-MODEL="${MODEL:-}"
+MODEL="${MODEL:-}"                       # default model for every agent
+BUILDER_MODEL="${BUILDER_MODEL:-$MODEL}" # per-agent overrides (empty = MODEL,
+VERIFIER_MODEL="${VERIFIER_MODEL:-$MODEL}" # both empty = CLI default)
 
 LOOP_DIR="${RUNNER_TEMP:-/tmp}/agent-loop"
 mkdir -p "$LOOP_DIR"
@@ -25,8 +27,10 @@ VERIFIER_TOOLS="Bash,Read,Glob,Grep"
 BUILDER_MAX_TURNS="${BUILDER_MAX_TURNS:-50}"
 VERIFIER_MAX_TURNS="${VERIFIER_MAX_TURNS:-25}"
 
-MODEL_ARGS=()
-[ -n "$MODEL" ] && MODEL_ARGS=(--model "$MODEL")
+BUILDER_MODEL_ARGS=()
+[ -n "$BUILDER_MODEL" ] && BUILDER_MODEL_ARGS=(--model "$BUILDER_MODEL")
+VERIFIER_MODEL_ARGS=()
+[ -n "$VERIFIER_MODEL" ] && VERIFIER_MODEL_ARGS=(--model "$VERIFIER_MODEL")
 
 GREEN=0
 ITERATIONS_USED=0
@@ -119,7 +123,7 @@ run_builder() {
     --permission-mode acceptEdits \
     --allowedTools "$BUILDER_TOOLS" \
     --max-turns "$BUILDER_MAX_TURNS" \
-    "${MODEL_ARGS[@]}" \
+    "${BUILDER_MODEL_ARGS[@]}" \
     "${resume_args[@]}" \
     >"$out" 2>"$out.err"
   rc=$?
@@ -144,7 +148,7 @@ run_verifier() {
     --permission-mode acceptEdits \
     --allowedTools "$VERIFIER_TOOLS" \
     --max-turns "$VERIFIER_MAX_TURNS" \
-    "${MODEL_ARGS[@]}" \
+    "${VERIFIER_MODEL_ARGS[@]}" \
     >"$out" 2>"$out.err" || true
   jq -r '.result // "verifier produced no report"' "$out" 2>/dev/null >"$1" \
     || echo "verifier produced no report" >"$1"
@@ -167,6 +171,7 @@ run_verify() {
 command -v claude >/dev/null 2>&1 || { echo "::error::claude CLI not on PATH"; exit 1; }
 log "Task: $TASK"
 log "Max iterations: $MAX_ITERATIONS · builder turns: $BUILDER_MAX_TURNS · verifier turns: $VERIFIER_MAX_TURNS"
+log "Models: builder=${BUILDER_MODEL:-default} · verifier=${VERIFIER_MODEL:-default}"
 
 for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   ITERATIONS_USED=$i

@@ -51,8 +51,13 @@ the only thing that counts as "done, tested, and checked."
 1. **Copy the files** in this package to your repo root (paths are already
    repo-relative). If you already have a `CLAUDE.md`, append the section from
    the packaged one instead of overwriting.
-2. **Add the secret**: repo → Settings → Secrets and variables → Actions → new
-   repository secret `ANTHROPIC_API_KEY` (from console.anthropic.com).
+2. **Add an auth secret** (repo → Settings → Secrets and variables → Actions),
+   one of:
+   - `CLAUDE_CODE_OAUTH_TOKEN` — Claude Pro/Max **subscription**: run
+     `claude setup-token` locally and paste the token. Runs draw on your
+     subscription's included usage instead of per-token billing.
+   - `ANTHROPIC_API_KEY` — pay-per-token API key from console.anthropic.com.
+   If both exist, the subscription token is used.
 3. **Allow PR creation**: Settings → Actions → General → Workflow permissions →
    check **"Allow GitHub Actions to create and approve pull requests"** (and
    keep "Read and write permissions" or rely on the workflow's `permissions:`
@@ -73,7 +78,10 @@ the only thing that counts as "done, tested, and checked."
 - `base_branch` — default `main`
 - `max_iterations` — implement→verify rounds before giving up (default 3)
 - `verify_command` — override the auto-detected gate (e.g. `npm run ci`)
-- `model` — optional model override
+- `model` — optional model for all agents
+- `builder_model` / `verifier_model` — per-agent overrides of `model`, so you
+  can mix models (e.g. a cheap builder with a stronger reviewer). The
+  discovery workflow has its own `model` input for the scout.
 
 **On a schedule**: *Agent Discovery & Triage* runs Mondays 06:00 UTC (edit the
 cron). The scout files at most 5 evidence-backed issues labeled `agent-loop`,

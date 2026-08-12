@@ -6,7 +6,9 @@ You give it a task. An AI agent builds it, a script proves it works, a second
 agent reviews it, and you get a PR. **Nothing merges without you.**
 
 1. Copy this repo's files into your project.
-2. Add the `ANTHROPIC_API_KEY` repo secret.
+2. Add ONE auth secret: `CLAUDE_CODE_OAUTH_TOKEN` (Claude Pro/Max
+   **subscription** — run `claude setup-token` locally and paste the token) or
+   `ANTHROPIC_API_KEY` (pay-per-token API key).
 3. Settings → Actions → General → enable **"Allow GitHub Actions to create and
    approve pull requests"**.
 4. Actions tab → **Agent Loop** → *Run workflow* → type your task → review the
@@ -67,7 +69,14 @@ you review and merge — the loop never merges its own work
 | `base_branch` | Branch to start from and target the PR at | `main` |
 | `max_iterations` | Implement → verify rounds before giving up | `3` |
 | `verify_command` | Override the auto-detected gate (e.g. `npm run ci`) | auto-detect |
-| `model` | Model override for the agents | provider default |
+| `model` | Model for **all** agents | CLI default |
+| `builder_model` | Model for the builder only (overrides `model`) | `model` |
+| `verifier_model` | Model for the verifier only (overrides `model`) | `model` |
+
+Mixing models is the usual reason to set these separately — e.g. a fast, cheap
+model for the builder (`claude-sonnet-5`) and a stronger one for the
+independent review (`claude-opus-5`), or vice versa. The discovery workflow
+takes its own `model` input for the scout.
 
 **On a schedule** — *Agent Discovery & Triage* runs Mondays 06:00 UTC. The
 scout files at most 5 evidence-backed issues labeled `agent-loop`, each ending
@@ -95,6 +104,19 @@ project, then:
 
 Optional: commit a `.mcp.json` at repo root to give the agents MCP connectors
 (Linear, etc.) — see `LOOP_PIPELINE.md` for the wiring.
+
+## Auth: subscription or API key
+
+Both workflows accept either secret, checked in this order:
+
+| Secret | Where it comes from | Billing |
+|---|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | Run `claude setup-token` on your machine (needs a Claude Pro/Max subscription), paste the token as a repo secret | Uses your subscription's included usage — no per-token charge |
+| `ANTHROPIC_API_KEY` | console.anthropic.com | Pay per token |
+
+If both are set, the subscription token wins. On subscription auth the
+"Est. API cost" column in PRs and job summaries is informational only —
+nothing is billed per token.
 
 ## Safety & cost
 
